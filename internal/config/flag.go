@@ -15,6 +15,7 @@ func InitFetcherFlags(cmd *cobra.Command) {
 func InitBlockchainFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("blockchain.rpc-urls", []string{"https://sepolia.infura.io"}, "set rpc urls")
 	cmd.Flags().Uint64("blockchain.timeout", 6, "set timeout for rpc requests in seconds")
+	cmd.Flags().Uint64("blockchain.health-check-freq", 30, "set frequency of RPC endpoint health checks in seconds")
 }
 
 func InitDatabaseFlags(cmd *cobra.Command) {

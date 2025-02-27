@@ -2,8 +2,8 @@ package fetcher
 
 import (
 	"context"
-	"fmt"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -56,75 +56,68 @@ func (s *Service) Start(ctx context.Context) error {
 	close(chunkChan)
 
 	var wg sync.WaitGroup
-	resultsChan := make(chan []types.Log, len(chunks))
-	errChan := make(chan error, len(chunks))
-
-	defer func() {
-		wg.Wait()
-		close(resultsChan)
-		close(errChan)
-	}()
+	defer wg.Wait()
 
 	for chunk := range chunkChan {
 		wg.Add(1)
 		go func(c blockchain.BlockRange) {
 			defer wg.Done()
 
-			logs, err := s.blockchain.FilterLogs(ctx, contractAddress, s.cfg.EventTopic, c)
+			chunkCtx, cancel := context.WithTimeout(ctx, time.Duration(s.cfg.ChunkSize/10+30)*time.Second)
+			defer cancel()
+
+			logs, err := s.blockchain.FilterLogs(chunkCtx, contractAddress, s.cfg.EventTopic, c)
 
 			if err != nil {
-				errChan <- fmt.Errorf("chunk %v failed: %w", c, err)
+				log.Error("error processing chunk", "from", c.From, "to", c.To, "error", err)
 				return
 			}
 
-			resultsChan <- logs
-		}(chunk)
-	}
-
-	for {
-		select {
-		case err, ok := <-errChan:
-			if !ok {
-				break
-			}
-
-			log.Error("error processing chunk", "error", err)
-		case logs, ok := <-resultsChan:
-			if !ok {
-				return nil
-			}
+			blockHashes := make([]common.Hash, 0)
+			blockHashMap := make(map[common.Hash][]types.Log)
 
 			for _, vLog := range logs {
 				if vLog.Removed {
 					continue
 				}
 
-				if err := s.processEvent(ctx, vLog); err != nil {
-					log.Error("error processing event", "error", err)
+				if _, exists := blockHashMap[vLog.BlockHash]; !exists {
+					blockHashes = append(blockHashes, vLog.BlockHash)
+				}
+				blockHashMap[vLog.BlockHash] = append(blockHashMap[vLog.BlockHash], vLog)
+			}
+
+			headers, err := s.blockchain.BatchGetBlockHeaders(chunkCtx, blockHashes)
+			if err != nil {
+				log.Error("error fetching block headers", "error", err)
+			}
+
+			for blockHash, blockLogs := range blockHashMap {
+				header := headers[blockHash]
+				if header == nil {
+					var fetchErr error
+					header, fetchErr = s.blockchain.GetBlockHeader(chunkCtx, blockHash)
+					if fetchErr != nil {
+						log.Error("error fetching block header individually", "blockHash", blockHash.String(), "error", fetchErr)
+						continue
+					}
+				}
+
+				for _, vLog := range blockLogs {
+					eventData := events.EventData{
+						L1InfoRoot: vLog.Data,
+						BlockTime:  header.Time,
+						ParentHash: header.ParentHash,
+					}
+
+					log.Debug("event data", "eventData", eventData)
+
+					if err := s.events.StoreEvent(eventData); err != nil {
+						log.Error("event storing failed", "blockHash", blockHash.String(), "error", err)
+					}
 				}
 			}
-		case <-ctx.Done():
-			return nil
-		}
-	}
-}
-
-func (s *Service) processEvent(ctx context.Context, vLog types.Log) error {
-	header, err := s.blockchain.GetBlockHeader(ctx, vLog.BlockHash)
-	if err != nil {
-		return fmt.Errorf("failed to get block header: %w", err)
-	}
-
-	eventData := events.EventData{
-		L1InfoRoot: vLog.Data,
-		BlockTime:  header.Time,
-		ParentHash: header.ParentHash,
-	}
-
-	log.Debug("processing event", "eventData", eventData)
-
-	if err := s.events.StoreEvent(eventData); err != nil {
-		return fmt.Errorf("event storing failed: %w", err)
+		}(chunk)
 	}
 
 	return nil

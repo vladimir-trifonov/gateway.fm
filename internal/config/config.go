@@ -27,8 +27,9 @@ type Fetcher struct {
 }
 
 type Blockchain struct {
-	RpcUrls []string `mapstructure:"rpc-urls" validate:"dive,url,required"`
-	Timeout uint64   `mapstructure:"timeout"`
+	RpcUrls         []string `mapstructure:"rpc-urls" validate:"dive,url,required"`
+	Timeout         uint64   `mapstructure:"timeout"`
+	HealthCheckFreq uint64   `mapstructure:"health-check-freq"`
 }
 
 type Database struct {
